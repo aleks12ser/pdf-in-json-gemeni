@@ -7,33 +7,45 @@ from google.genai import types
 from pydantic import BaseModel, Field
 import fitz  # PyMuPDF
 
-# Импортируем компоненты PyQt6
+# Import PyQt6 components
 from PyQt6.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QPushButton, QFileDialog, QTextEdit, QLabel, QProgressBar)
 from PyQt6.QtCore import QThread, pyqtSignal
+
 # ==========================================
-# 1. НАСТРОЙКА Gemini & Pydantic
+# 1. Gemini & Pydantic Setup
 # ==========================================
 load_dotenv()
 api_key = os.getenv("GEMINI_API_KEY")
 
 
 class PageData(BaseModel):
-    has_formulas: bool = Field(description="Есть ли математические или химические формулы на странице")
+    has_formulas: bool = Field(
+        description="Whether the page contains mathematical or chemical formulas"
+    )
+
     formulas: list[str] = Field(
-        description="Список всех найденных формул на странице, переведенных в формат LaTeX (например, $E=mc^2$)")
-    has_images: bool = Field(description="Есть ли на странице иллюстрации, графики, фотографии или схемы (не формулы)")
+        description="List of all formulas found on the page converted to LaTeX format (e.g. $E=mc^2$)"
+    )
+
+    has_images: bool = Field(
+        description="Whether the page contains illustrations, charts, photos, or diagrams (excluding formulas)"
+    )
+
     images_description: list[str] = Field(
-        description="Подробное описание каждого изображения/графика/схемы на странице. Если изображений нет - пустой список")
+        description="Detailed description of each image/chart/diagram on the page. Empty list if there are no images"
+    )
+
     full_text: str = Field(
-        description="Полный структурированный текст страницы, включая распознанный текст с картинок, если он там есть. Формулы внутри текста тоже должны быть в формате LaTeX")
+        description="Full structured text of the page, including text recognized from images. Formulas inside the text should also be in LaTeX format"
+    )
 
 
 # ==========================================
-# 2. ПОТОК ДЛЯ ВЫЧИСЛЕНИЙ (Чтобы GUI не зависал)
+# 2. WORKER THREAD (Prevents GUI from freezing)
 # ==========================================
 class PDFProcessingThread(QThread):
-    # Сигналы для обновления интерфейса из другого потока
+    # Signals for updating the interface from another thread
     progress_changed = pyqtSignal(int)
     status_changed = pyqtSignal(str)
     processing_finished = pyqtSignal(dict, str)
@@ -49,10 +61,11 @@ class PDFProcessingThread(QThread):
         image_bytes = pix.tobytes("jpeg")
 
         prompt = (
-            "Проанализируй этот лист из PDF-документа. Тебе нужно извлечь весь текст. "
-            "Если на странице есть математические, физические или химические формулы, обязательно "
-            "переведи их в формат LaTeX. Если на странице есть изображения (графики, схемы, рисунки), "
-            "детально опиши, что на них изображено."
+            "Analyze this PDF page. Extract all text. "
+            "If the page contains mathematical, physical, or chemical formulas, "
+            "convert them into LaTeX format. "
+            "If the page contains images (charts, diagrams, drawings), "
+            "describe them in detail."
         )
 
         image_part = types.Part.from_bytes(data=image_bytes, mime_type="image/jpeg")
@@ -70,7 +83,7 @@ class PDFProcessingThread(QThread):
 
     def run(self):
         if not api_key:
-            self.status_changed.emit("Ошибка: GEMINI_API_KEY не найден в .env")
+            self.status_changed.emit("Error: GEMINI_API_KEY was not found in .env")
             return
 
         client = genai.Client(api_key=api_key)
@@ -85,16 +98,21 @@ class PDFProcessingThread(QThread):
 
         for page_num in range(total_pages):
             page = doc.load_page(page_num)
-            self.status_changed.emit(f"Обработка страницы {page_num + 1} из {total_pages}...")
+            self.status_changed.emit(
+                f"Processing page {page_num + 1} of {total_pages}..."
+            )
 
-            # Способ 1: Извлекаем обычный текст
+            # Method 1: Extract regular text
             raw_text = page.get_text().strip()
 
             if len(raw_text) < 10:
                 self.status_changed.emit(
-                    f"Страница {page_num + 1}: Текст не найден. Рендерим JPEG и отправляем в Gemini...")
+                    f"Page {page_num + 1}: No text found. Rendering JPEG and sending to Gemini..."
+                )
+
                 try:
                     gemini_data = self.process_page_with_gemini(client, page)
+
                     page_json = {
                         "page_number": page_num + 1,
                         "extraction_method": "gemini_vision_ocr",
@@ -104,12 +122,14 @@ class PDFProcessingThread(QThread):
                         "images_description": gemini_data.images_description,
                         "text": gemini_data.full_text
                     }
+
                 except Exception as e:
                     page_json = {
                         "page_number": page_num + 1,
                         "extraction_method": "failed",
-                        "text": f"[ОШИБКА: {str(e)}]"
+                        "text": f"[ERROR: {str(e)}]"
                     }
+
             else:
                 page_json = {
                     "page_number": page_num + 1,
@@ -123,14 +143,15 @@ class PDFProcessingThread(QThread):
 
             final_result["pages"].append(page_json)
 
-            # Считаем процент прогресса
+            # Calculate progress percentage
             progress = int(((page_num + 1) / total_pages) * 100)
             self.progress_changed.emit(progress)
 
         doc.close()
 
-        # Генерируем имя выходного файла
+        # Generate output filename
         output_filename = self.pdf_path.replace(".pdf", "_output.json")
+
         with open(output_filename, "w", encoding="utf-8") as f:
             json.dump(final_result, f, ensure_ascii=False, indent=4)
 
@@ -138,7 +159,7 @@ class PDFProcessingThread(QThread):
 
 
 # ==========================================
-# 3. ГРАФИЧЕСКИЙ ИНТЕРФЕЙС (PyQt5 Window)
+# 3. GRAPHICAL INTERFACE (PyQt6 Window)
 # ==========================================
 class PDFConverterApp(QWidget):
     def __init__(self):
@@ -146,25 +167,27 @@ class PDFConverterApp(QWidget):
         self.initUI()
 
     def initUI(self):
-        # Настройка окна
-        self.setWindowTitle('Умный PDF в JSON Конвертер (Hybrid & Gemini)')
+        # Window setup
+        self.setWindowTitle('Smart PDF to JSON Converter (Hybrid & Gemini)')
         self.setGeometry(300, 300, 600, 450)
 
-        # Элементы интерфейса
-        self.btn_open = QPushButton('Выбрать PDF файл', self)
+        # UI elements
+        self.btn_open = QPushButton('Select PDF File', self)
         self.btn_open.clicked.connect(self.showDialog)
 
-        self.lbl_file = QLabel('Файл не выбран', self)
-        self.lbl_status = QLabel('Статус: Ожидание', self)
+        self.lbl_file = QLabel('No file selected', self)
+        self.lbl_status = QLabel('Status: Waiting', self)
 
         self.progress_bar = QProgressBar(self)
         self.progress_bar.setValue(0)
 
         self.text_preview = QTextEdit(self)
         self.text_preview.setReadOnly(True)
-        self.text_preview.setPlaceholderText("Здесь будет отображаться лог и превью JSON...")
+        self.text_preview.setPlaceholderText(
+            "Logs and JSON preview will be displayed here..."
+        )
 
-        # Разметка (Layout)
+        # Layout
         vbox = QVBoxLayout()
 
         hbox_file = QHBoxLayout()
@@ -179,25 +202,30 @@ class PDFConverterApp(QWidget):
         self.setLayout(vbox)
 
     def showDialog(self):
-        # Диалоговое окно выбора файла
-        fname, _ = QFileDialog.getOpenFileName(self, 'Открыть PDF файл', '', 'PDF Files (*.pdf)')
+        # File selection dialog
+        fname, _ = QFileDialog.getOpenFileName(
+            self,
+            'Open PDF File',
+            '',
+            'PDF Files (*.pdf)'
+        )
 
         if fname:
             self.lbl_file.setText(os.path.basename(fname))
             self.text_preview.clear()
             self.progress_bar.setValue(0)
 
-            # Запускаем фоновый поток обработки
+            # Start background processing thread
             self.thread = PDFProcessingThread(fname)
             self.thread.status_changed.connect(self.update_status)
             self.thread.progress_changed.connect(self.update_progress)
             self.thread.processing_finished.connect(self.on_finished)
 
-            self.btn_open.setEnabled(False)  # Блокируем кнопку на время работы
+            self.btn_open.setEnabled(False)
             self.thread.start()
 
     def update_status(self, text):
-        self.lbl_status.setText(f"Статус: {text}")
+        self.lbl_status.setText(f"Status: {text}")
         self.text_preview.append(text)
 
     def update_progress(self, value):
@@ -205,19 +233,27 @@ class PDFConverterApp(QWidget):
 
     def on_finished(self, result_dict, output_path):
         self.btn_open.setEnabled(True)
-        self.lbl_status.setText("Статус: Готово!")
-        self.text_preview.append(f"\n🎉 Обработка завершена!\nФайл сохранен в: {output_path}\n")
-        # Выводим красивое превью получившегося JSON в текстовое поле
-        self.text_preview.append(json.dumps(result_dict, ensure_ascii=False, indent=2))
+        self.lbl_status.setText("Status: Completed!")
+        self.text_preview.append(
+            f"\n🎉 Processing completed!\nFile saved to: {output_path}\n"
+        )
+
+        # Display formatted JSON preview
+        self.text_preview.append(
+            json.dumps(result_dict, ensure_ascii=False, indent=2)
+        )
 
 
 if __name__ == '__main__':
-    # Проверяем PyQt5 перед запуском
+    # Check PyQt6 before launch
     try:
         app = QApplication(sys.argv)
         ex = PDFConverterApp()
         ex.show()
-        # Вместо sys.exit(app.exec_()) пишем:
-        sys.exit(app.exec())  # в PyQt6 убрали нижнее подчеркивание у exec_
+
+        # In PyQt6 exec_() was renamed to exec()
+        sys.exit(app.exec())
+
     except ModuleNotFoundError:
-        print("Ошибка: Установите PyQt5 командой: pip install PyQt5")
+        print("Error: Install PyQt6 with: pip install PyQt6")
+
